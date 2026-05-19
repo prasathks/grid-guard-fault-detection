@@ -1,0 +1,16 @@
+# Ignore data files
+data/
+*.npy
+*.csv
+
+# Ignore compiled python files
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+env/
+.env
+
+# TF/Keras intermediate models
+*.h5

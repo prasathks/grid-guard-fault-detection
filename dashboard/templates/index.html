@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PhantomKeys — LV Line Monitor Dashboard</title>
+
+  <!-- Tailwind CDN (quick) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+
+  <style>
+    /* dark-blue theme */
+    :root{
+      --bg:#071029;
+      --card:#07263e;
+      --accent:#0ea5a7; /* teal-ish accent */
+      --muted:#88a0b6;
+      --danger:#ff6b6b;
+    }
+    body { background: linear-gradient(180deg,var(--bg), #032034); color: #e6f3ff; }
+    .card { background: linear-gradient(180deg,var(--card), rgba(7,38,62,0.6)); }
+  </style>
+</head>
+<body class="min-h-screen p-4">
+
+  <div class="max-w-7xl mx-auto">
+    <header class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-semibold">LV Line Monitor Dashboard</h1>
+        <p class="text-sm text-gray-300">Realtime detection & alerts — Location: {{ default_location }}</p>
+      </div>
+      <div class="space-x-2">
+        <button id="exportCsv" class="px-3 py-2 rounded bg-sky-600 hover:bg-sky-500">Export CSV</button>
+        <button id="clearScreen" class="px-3 py-2 rounded bg-slate-600">Clear</button>
+      </div>
+    </header>
+
+    <main class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <!-- Left: live chart -->
+      <section class="md:col-span-2 card p-4 rounded-lg shadow">
+        <div class="flex justify-between items-start">
+          <h2 class="text-lg font-medium">Live Current & Prediction</h2>
+          <div id="statusBadge" class="text-sm px-2 py-1 rounded">Connected</div>
+        </div>
+        <canvas id="chart" height="200"></canvas>
+        <div class="mt-3 grid grid-cols-3 gap-2">
+          <div class="p-3 rounded bg-slate-800">
+            <div class="text-xs text-gray-300">Latest Current</div>
+            <div id="latestCurrent" class="text-xl font-semibold">— A</div>
+          </div>
+          <div class="p-3 rounded bg-slate-800">
+            <div class="text-xs text-gray-300">Latest Pred</div>
+            <div id="latestPred" class="text-xl font-semibold">Normal</div>
+          </div>
+          <div class="p-3 rounded bg-slate-800">
+            <div class="text-xs text-gray-300">Latest Prob</div>
+            <div id="latestProb" class="text-xl font-semibold">— %</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: analytics -->
+      <aside class="card p-4 rounded-lg shadow">
+        <h3 class="text-lg">Analytics</h3>
+        <div class="mt-3">
+          <div class="text-sm text-gray-300">Counts by class</div>
+          <ul id="countsList" class="mt-2 text-sm space-y-1">
+            <li>Normal: <span id="count0">0</span></li>
+            <li>Open/Line: <span id="count1">0</span></li>
+            <li>Short: <span id="count2">0</span></li>
+            <li>Line-Ground: <span id="count3">0</span></li>
+          </ul>
+        </div>
+
+        <div class="mt-4">
+          <h4 class="text-sm text-gray-300">Fault Events (recent)</h4>
+          <div id="events" class="mt-2 text-xs max-h-48 overflow-auto"></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+<script>
+  const socket = io();
+
+  // Chart setup
+  const ctx = document.getElementById('chart').getContext('2d');
+  const data = {
+    labels: [],
+    datasets: [
+      { label: 'Current (A)', yAxisID: 'A', data: [], tension: 0.2, borderWidth: 2, fill: false },
+      { label: 'Prob (%)', yAxisID: 'P', data: [], tension: 0.2, borderWidth: 2, fill: false }
+    ]
+  };
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data,
+    options: {
+      scales: {
+        A: { type: 'linear', position: 'left' },
+        P: { type: 'linear', position: 'right', min: 0, max: 100 }
+      },
+      plugins: { legend: { labels: { color: '#CFE8FF' } } },
+      maintainAspectRatio: false
+    }
+  });
+
+  function addPoint(rec){
+    const label = new Date(rec.timestamp).toLocaleTimeString();
+    data.labels.push(label);
+    data.datasets[0].data.push(rec.current);
+    data.datasets[1].data.push(rec.prob);
+    // keep size reasonable
+    if(data.labels.length > 200){
+      data.labels.shift();
+      data.datasets.forEach(ds=>ds.data.shift());
+    }
+    chart.update('none');
+    // update overview
+    document.getElementById('latestCurrent').innerText = rec.current.toFixed(3) + ' A';
+    const classes = {0:'Normal',1:'Open/Line',2:'Short',3:'Line-Ground'};
+    document.getElementById('latestPred').innerText = classes[rec.pred_class] || rec.pred_class;
+    document.getElementById('latestProb').innerText = rec.prob.toFixed(2) + ' %';
+  }
+
+  // counts & events handling
+  const counts = {0:0,1:0,2:0,3:0};
+  function updateCounts(c){
+    ['0','1','2','3'].forEach(k=>{
+      document.getElementById('count'+k).innerText = c[k] || 0;
+    });
+  }
+
+  function pushEvent(txt){
+    const el = document.createElement('div');
+    el.className = 'p-2 border-b border-slate-700';
+    el.innerText = txt;
+    document.getElementById('events').prepend(el);
+  }
+
+  // socket listener
+  socket.on('connect', ()=> {
+    document.getElementById('statusBadge').innerText = 'Connected';
+  });
+  socket.on('disconnect', ()=> {
+    document.getElementById('statusBadge').innerText = 'Disconnected';
+  });
+
+  socket.on('new_reading', (rec) => {
+    addPoint(rec);
+    // update counts locally
+    counts[rec.pred_class] = (counts[rec.pred_class] || 0) + 1;
+    updateCounts(counts);
+    // if fault
+    if(rec.pred_class !== 0 && rec.prob >= 50.0){
+      pushEvent(`[${new Date(rec.timestamp).toLocaleTimeString()}] FAULT: class ${rec.pred_class} prob ${rec.prob.toFixed(1)}%`);
+    }
+  });
+
+  // Export CSV button
+  document.getElementById('exportCsv').addEventListener('click', ()=>{
+    window.location = '/export/csv';
+  });
+
+  // Clear UI (not server)
+  document.getElementById('clearScreen').addEventListener('click', ()=>{
+    data.labels = []; data.datasets.forEach(ds=>ds.data = []);
+    chart.update();
+    document.getElementById('events').innerHTML = '';
+  });
+
+  // load initial analytics
+  fetch('/api/analytics').then(r=>r.json()).then(js=>{
+    // add last points to chart
+    (js.last_points || []).forEach(p=> addPoint(p));
+    updateCounts(js.counts || {});
+    (js.fault_events || []).slice(-20).forEach(e=>{
+      pushEvent(`${e.timestamp} - ${e.type} ${e.pred_class ? ('class '+e.pred_class) : ''}`);
+    });
+  }).catch(()=>{});
+</script>
+</body>
+</html>
